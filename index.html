@@ -245,6 +245,21 @@
   }
   .toast.show { opacity: 1; transform: translateY(0); }
 
+  /* ── Login screen ── */
+  .login-screen {
+    position: fixed; inset: 0; background: #f4f6f9;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9000;
+  }
+  .login-card {
+    background: white; border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+    padding: 40px 36px; width: 100%; max-width: 360px;
+  }
+  .login-card h2 { font-size: 20px; font-weight: 700; margin-bottom: 6px; color: #1a1a2e; }
+  .login-card p  { font-size: 13px; color: #9ca3af; margin-bottom: 24px; }
+  .login-err { color: #dc2626; font-size: 12px; margin-top: 10px; min-height: 18px; }
+
   /* ── Sync bar ── */
   .sync-bar {
     background: #f8fafc; border-bottom: 1px solid #e2e6ed;
@@ -320,10 +335,32 @@
 </head>
 <body>
 
+<!-- Login Screen -->
+<div class="login-screen" id="loginScreen">
+  <div class="login-card">
+    <h2>Landlord Manager</h2>
+    <p>Sign in to access your properties</p>
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" id="loginUser" placeholder="Enter username" onkeydown="if(event.key==='Enter') doLogin()">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="loginPass" placeholder="Enter password" onkeydown="if(event.key==='Enter') doLogin()">
+    </div>
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In</button>
+    <div class="login-err" id="loginErr"></div>
+  </div>
+</div>
+
 <!-- Header -->
 <header>
   <h1>Landlord Shop Management</h1>
-  <span class="header-meta" id="propCount">0 Properties</span>
+  <div style="display:flex;align-items:center;gap:14px">
+    <span class="header-meta" id="loggedInUser"></span>
+    <span class="header-meta" id="propCount">0 Properties</span>
+    <button class="btn btn-ghost btn-sm" style="color:white;border-color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.1)" onclick="doLogout()">Sign Out</button>
+  </div>
 </header>
 
 <!-- Sync Bar -->
@@ -588,17 +625,134 @@
 <div class="toast" id="toast"></div>
 
 <script>
-// ── JSONBin config — paste your Secret Key and Bin ID below ──────────────────
+// ── User accounts ─────────────────────────────────────────────────────────────
+// Passwords are SHA-256 hashed — never stored as plain text
+// To generate a hash: open browser console and run:
+//   hashPassword('yourpassword').then(console.log)
 const JSONBIN_SECRET = '$2a$10$LZuNu9bn07dWn6AOpnSREuPLBsRrNU9exVI0pu/4pT0AhZR8Rl.ZG';
-const JSONBIN_BIN_ID = '6a2a4989f5f4af5e29dccec6';
-const JSONBIN_URL    = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`;
-// ─────────────────────────────────────────────────────────────────────────────
+const USERS = [
+  {
+    username: 'sai',
+    // SHA-256 hash of 'sai123'
+    passHash: '2252ee9088f889869c4dbffe0857f4b51480283a1af5b8cb4147de09fe1e416c',
+    binId: '6a2a4989f5f4af5e29dccec6',
+    // Encryption key — keep this secret, unique per user
+    encKey: 'sai-landlord-key-2025'
+  },
+  // To add a family member:
+  // 1. Create a new JSONBin bin at jsonbin.io with {"properties":[]}
+  // 2. Run hashPassword('theirpassword') in browser console to get hash
+  // 3. Add entry below:
+  // { username: 'family1', passHash: 'HASH_HERE', binId: 'THEIR_BIN_ID', encKey: 'unique-key-family1' },
+];
 
-let state     = { properties: [] };
-let importRows = [];
-let saveTimer  = null;
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_LOGIN_ATTEMPTS = 5;
 
-// ── Sync helpers ──────────────────────────────────────────────────────────────
+let state        = { properties: [] };
+let importRows   = [];
+let saveTimer    = null;
+let currentUser  = null;
+let sessionTimer = null;
+let loginAttempts = 0;
+let lockUntil    = 0;
+
+// ── Crypto helpers ─────────────────────────────────────────────────────────────
+async function hashPassword(pwd) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pwd));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function getAesKey(encKey) {
+  const keyBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encKey));
+  return crypto.subtle.importKey('raw', keyBuf, { name: 'AES-GCM' }, false, ['encrypt','decrypt']);
+}
+
+async function encryptData(data, encKey) {
+  const key  = await getAesKey(encKey);
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const enc  = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(data)));
+  // Store iv + ciphertext as base64
+  const combined = new Uint8Array(iv.byteLength + enc.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(enc), iv.byteLength);
+  return btoa(String.fromCharCode(...combined));
+}
+
+async function decryptData(b64, encKey) {
+  const combined = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const iv  = combined.slice(0, 12);
+  const enc = combined.slice(12);
+  const key = await getAesKey(encKey);
+  const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, enc);
+  return JSON.parse(new TextDecoder().decode(dec));
+}
+
+// ── Login / Logout ─────────────────────────────────────────────────────────────
+async function doLogin() {
+  const errEl    = document.getElementById('loginErr');
+  const now      = Date.now();
+
+  // Rate limit check
+  if (now < lockUntil) {
+    const secs = Math.ceil((lockUntil - now) / 1000);
+    errEl.textContent = `Too many attempts. Try again in ${secs}s.`;
+    return;
+  }
+
+  const username = document.getElementById('loginUser').value.trim();
+  const password = document.getElementById('loginPass').value;
+  if (!username || !password) { errEl.textContent = 'Enter username and password.'; return; }
+
+  const hash = await hashPassword(password);
+  const user = USERS.find(u => u.username === username && u.passHash === hash);
+
+  if (!user) {
+    loginAttempts++;
+    if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
+      lockUntil = Date.now() + 60000; // lock 60 seconds
+      loginAttempts = 0;
+      errEl.textContent = 'Too many failed attempts. Locked for 60 seconds.';
+    } else {
+      errEl.textContent = `Incorrect username or password. (${MAX_LOGIN_ATTEMPTS - loginAttempts} attempts left)`;
+    }
+    return;
+  }
+
+  loginAttempts = 0;
+  currentUser   = user;
+  sessionStorage.setItem('lsm_user', username);
+  document.getElementById('loginScreen').style.display  = 'none';
+  document.getElementById('loggedInUser').textContent = `Signed in as ${username}`;
+  resetSessionTimer();
+  load();
+}
+
+function doLogout(expired) {
+  clearTimeout(sessionTimer);
+  sessionStorage.removeItem('lsm_user');
+  currentUser = null;
+  state = { properties: [] };
+  render();
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('loginUser').value  = '';
+  document.getElementById('loginPass').value  = '';
+  document.getElementById('loginErr').textContent = expired ? 'Session expired. Please sign in again.' : '';
+}
+
+function resetSessionTimer() {
+  clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(() => doLogout(true), SESSION_TIMEOUT_MS);
+}
+
+// Reset session timer on any user interaction
+document.addEventListener('click',    resetSessionTimer);
+document.addEventListener('keypress', resetSessionTimer);
+
+// ── Sync helpers ───────────────────────────────────────────────────────────────
+function binUrl() {
+  return `https://api.jsonbin.io/v3/b/${currentUser.binId}`;
+}
 function setSyncState(status, label, note) {
   const dot = document.getElementById('syncDot');
   dot.className = 'sync-dot ' + status;                          // ok | busy | err
@@ -607,36 +761,32 @@ function setSyncState(status, label, note) {
 }
 
 async function loadFromCloud() {
-  if (JSONBIN_SECRET === 'YOUR_SECRET_KEY') return;             // not configured yet
   setSyncState('busy', 'Loading from cloud…', '');
   try {
-    const res = await fetch(JSONBIN_URL + '/latest', {
+    const res = await fetch(binUrl() + '/latest', {
       headers: { 'X-Master-Key': JSONBIN_SECRET, 'X-Bin-Meta': 'false' }
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    state = await res.json();
-    if (!state.properties) state = { properties: [] };
+    const raw = await res.json();
+    // Decrypt if data is encrypted (has .enc field), else use as-is (first run)
+    state = raw.enc ? await decryptData(raw.enc, currentUser.encKey) : (raw.properties ? raw : { properties: [] });
     setSyncState('ok', 'Cloud sync active', 'Loaded ' + new Date().toLocaleTimeString());
     render();
   } catch(e) {
     setSyncState('err', 'Cloud load failed — using local data', e.message);
-    const s = localStorage.getItem('lsm_state');
-    if (s) { state = JSON.parse(s); render(); }
+    const s = localStorage.getItem('lsm_' + currentUser.username);
+    if (s) { try { state = await decryptData(s, currentUser.encKey); } catch { state = { properties:[] }; } render(); }
   }
 }
 
 async function saveToCloud() {
-  if (JSONBIN_SECRET === 'YOUR_SECRET_KEY') return;
   setSyncState('busy', 'Saving to cloud…', '');
   try {
-    const res = await fetch(JSONBIN_URL, {
+    const enc = await encryptData(state, currentUser.encKey);
+    const res = await fetch(binUrl(), {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': JSONBIN_SECRET,
-        'X-Bin-Versioning': 'false'
-      },
-      body: JSON.stringify(state)
+      headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_SECRET, 'X-Bin-Versioning': 'false' },
+      body: JSON.stringify({ enc })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     setSyncState('ok', 'Cloud sync active', 'Saved ' + new Date().toLocaleTimeString());
@@ -645,17 +795,17 @@ async function saveToCloud() {
   }
 }
 
-function load() {
-  const s = localStorage.getItem('lsm_state');
-  if (s) state = JSON.parse(s);
-  render();
-  loadFromCloud();   // pull latest from JSONBin on every page open
+async function load() {
+  const s = localStorage.getItem('lsm_' + currentUser.username);
+  if (s) { try { state = await decryptData(s, currentUser.encKey); render(); } catch { state = { properties:[] }; } }
+  await loadFromCloud();
 }
 
-function save() {
-  localStorage.setItem('lsm_state', JSON.stringify(state));  // instant local backup
+async function save() {
+  const enc = await encryptData(state, currentUser.encKey);
+  localStorage.setItem('lsm_' + currentUser.username, enc);
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveToCloud, 800);                   // debounced cloud save
+  saveTimer = setTimeout(saveToCloud, 800);
 }
 function uid()  { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
@@ -1184,7 +1334,15 @@ function render() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  load();
+  // Auto-restore session if still active
+  const savedUser = sessionStorage.getItem('lsm_user');
+  const user = USERS.find(u => u.username === savedUser);
+  if (user) {
+    currentUser = user;
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('loggedInUser').textContent = `Signed in as ${user.username}`;
+    load();
+  }
   const area = document.getElementById('importArea');
   area.addEventListener('dragover', e => { e.preventDefault(); area.style.borderColor = '#2563eb'; });
   area.addEventListener('dragleave', () => area.style.borderColor = '');
