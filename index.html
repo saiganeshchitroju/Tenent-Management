@@ -624,13 +624,10 @@
 
 <div class="toast" id="toast"></div>
 
-<!-- Firebase SDK -->
 <script type="module">
-import { initializeApp }          from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
-                                   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc }
-                                   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { initializeApp }                                        from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc }                    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey:            'AIzaSyDLSjbkxSTAk4fdfYKjG4b_lr8xKTdLfX0',
@@ -645,52 +642,40 @@ const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getFirestore(app);
 
-let state     = { properties: [] };
+let state      = { properties: [] };
 let importRows = [];
 let saveTimer  = null;
+let calYear, calMonth, calPid, calTid;
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-window.doLogin = async function() {
-  const email = document.getElementById('loginEmail').value.trim();
-  const pass  = document.getElementById('loginPass').value;
-  const errEl = document.getElementById('loginErr');
-  const btn   = document.getElementById('loginBtn');
-  if (!email || !pass) { errEl.textContent = 'Enter email and password.'; return; }
-  btn.textContent = 'Signing in…'; btn.disabled = true;
-  try {
-    await signInWithEmailAndPassword(auth, email, pass);
-  } catch(e) {
-    errEl.textContent = 'Incorrect email or password.';
-    btn.textContent = 'Sign In'; btn.disabled = false;
-  }
-};
+// Expose functions to HTML onclick handlers
+window.openAddProperty    = () => openAddProperty();
+window.openEditProperty   = (id) => openEditProperty(id);
+window.deleteProperty     = (id) => deleteProperty(id);
+window.openAddTenant      = (id) => openAddTenant(id);
+window.openEditTenant     = (p,t) => openEditTenant(p,t);
+window.deleteTenant       = (p,t) => deleteTenant(p,t);
+window.togglePaid         = (p,t) => togglePaid(p,t);
+window.openLogPayment     = (p,t) => openLogPayment(p,t);
+window.openCalendar       = (p,t) => openCalendar(p,t);
+window.showProjectionModal= (p,t) => showProjectionModal(p,t);
+window.markAllPaid        = (id) => markAllPaid(id);
+window.markAllUnpaid      = (id) => markAllUnpaid(id);
+window.exportPropertyCSV  = (id) => exportPropertyCSV(id);
+window.exportAllCSV       = () => exportAllCSV();
+window.openImportModal    = () => openImportModal();
+window.downloadTemplateCSV= () => downloadTemplateCSV();
+window.confirmImport      = () => confirmImport();
+window.handleCSVImport    = (e) => handleCSVImport(e);
+window.saveProperty       = () => saveProperty();
+window.saveTenant         = () => saveTenant();
+window.savePayment        = () => savePayment();
+window.shiftCalMonth      = (d) => shiftCalMonth(d);
+window.closeModal         = (id) => closeModal(id);
+window.updateProjection   = () => updateProjection();
 
-window.doLogout = async function() {
-  await signOut(auth);
-};
-
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    document.getElementById('loginScreen').style.display = 'none';
-    document.getElementById('loggedInUser').textContent  = user.email;
-    setSyncState('busy', 'Loading your data…', '');
-    await loadFromFirestore(user.uid);
-  } else {
-    state = { properties: [] };
-    render();
-    document.getElementById('loginScreen').style.display = 'flex';
-    document.getElementById('loginEmail').value = '';
-    document.getElementById('loginPass').value  = '';
-    document.getElementById('loginErr').textContent = '';
-    document.getElementById('loginBtn').textContent = 'Sign In';
-    document.getElementById('loginBtn').disabled = false;
-    setSyncState('ok', 'Signed out', '');
-  }
-});
-
-// ── Firestore sync ────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────
 function setSyncState(status, label, note) {
-  document.getElementById('syncDot').className   = 'sync-dot ' + status;
+  document.getElementById('syncDot').className    = 'sync-dot ' + status;
   document.getElementById('syncLabel').textContent = label;
   document.getElementById('syncNote').textContent  = note || '';
 }
@@ -703,19 +688,18 @@ async function loadFromFirestore(uid) {
     setSyncState('ok', 'Firebase sync active', 'Loaded ' + new Date().toLocaleTimeString());
     render();
   } catch(e) {
-    setSyncState('err', 'Load failed — check Firestore rules', e.message);
+    setSyncState('err', 'Load failed — ' + e.message, '');
   }
 }
 
 async function saveToFirestore() {
-  const user = auth.currentUser;
-  if (!user) return;
+  const user = auth.currentUser; if (!user) return;
   setSyncState('busy', 'Saving…', '');
   try {
     await setDoc(doc(db, 'users', user.uid), state);
     setSyncState('ok', 'Firebase sync active', 'Saved ' + new Date().toLocaleTimeString());
   } catch(e) {
-    setSyncState('err', 'Save failed', e.message);
+    setSyncState('err', 'Save failed — ' + e.message, '');
   }
 }
 
@@ -724,11 +708,30 @@ function save() {
   saveTimer = setTimeout(saveToFirestore, 800);
 }
 
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+// ── Auth ──────────────────────────────────────────────────────────────────────
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('loggedInUser').textContent  = user.email;
+    setSyncState('busy', 'Loading your data…', '');
+    await loadFromFirestore(user.uid);
+  } else {
+    state = { properties: [] };
+    render();
+    document.getElementById('loginScreen').style.display = 'flex';
+    document.getElementById('loginEmail').value          = '';
+    document.getElementById('loginPass').value           = '';
+    document.getElementById('loginErr').textContent      = '';
+    document.getElementById('loginBtn').textContent      = 'Sign In';
+    document.getElementById('loginBtn').disabled         = false;
+    setSyncState('ok', 'Signed out', '');
+  }
+});
 
-</script>
-<script>
-function uid()  { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -1255,6 +1258,30 @@ function render() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Wire up login/logout buttons (module scope requires this)
+  document.getElementById('loginBtn').addEventListener('click', async () => {
+    const email = document.getElementById('loginEmail').value.trim();
+    const pass  = document.getElementById('loginPass').value;
+    const errEl = document.getElementById('loginErr');
+    const btn   = document.getElementById('loginBtn');
+    if (!email || !pass) { errEl.textContent = 'Enter email and password.'; return; }
+    btn.textContent = 'Signing in…'; btn.disabled = true;
+    try {
+      await signInWithEmailAndPassword(auth, email, pass);
+    } catch(e) {
+      errEl.textContent = 'Incorrect email or password.';
+      btn.textContent = 'Sign In'; btn.disabled = false;
+    }
+  });
+
+  ['loginEmail','loginPass'].forEach(id =>
+    document.getElementById(id).addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('loginBtn').click();
+    })
+  );
+
+  document.querySelector('[onclick="doLogout()"]').addEventListener('click', () => signOut(auth));
+
   const area = document.getElementById('importArea');
   area.addEventListener('dragover', e => { e.preventDefault(); area.style.borderColor = '#2563eb'; });
   area.addEventListener('dragleave', () => area.style.borderColor = '');
